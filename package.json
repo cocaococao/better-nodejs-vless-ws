@@ -1,0 +1,15 @@
+{
+  "name": "better-nj-ws",
+  "version": "1.0.0",
+  "description": "enhancement from node-ws",
+  "main": "appws.js",
+  "type": "module",
+  "scripts": {
+    "start": "node appws.js"
+  },
+  "author": "cocaococao",
+  "license": "GPL-3.0-or-later",
+  "engines": {
+    "node": ">16.0.0"
+  }
+}
