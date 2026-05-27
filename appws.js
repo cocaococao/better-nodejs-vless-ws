@@ -13,7 +13,7 @@ const TARGET_UUID_BYTES = Buffer.from(UUID.replace(/-/g, ''), 'hex');
 
 const WSPATH = process.env.WSPATH || UUID.slice(0, 8);
 const PORT = parseInt(process.env.SERVER_PORT || process.env.PORT || '3000', 10);
-const HOST = '0.0.0.0';
+const HOST = const HOST = process.env.SERVER_HOST || process.env.HOST || '0.0.0.0';
 
 const DNS_TTL = 300;
 const DNS_SWEEP = 60;
