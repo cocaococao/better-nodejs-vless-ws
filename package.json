@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "description": "enhancement from node-ws",
   "main": "appws.js",
-  "type": "module",
+  "type": "commonjs",
   "scripts": {
     "start": "node appws.js"
   },
