@@ -1554,3 +1554,17 @@ server.listen(PORT, HOST, () => {
   console.log(`\n Native vls-WS Server Active on ${HOST}:${PORT}\nPath: /${WSPATH}\nUUID: ${UUID}\n`);
   console.log(` Admin Stats: http://${HOST}:${PORT}/admin-stats\n`);
 });
+
+// ==========================================
+// EXPORTS
+// ==========================================
+module.exports = server;
+module.exports.server = server;
+module.exports.generateStatsHtml = generateStatsHtml;
+module.exports.log = log;
+module.exports.isBlockedDomain = isBlockedDomain;
+module.exports.resolveAndSend = resolveAndSend;
+module.exports.createWsCodec = createWsCodec;
+module.exports.getAcceptKey = getAcceptKey;
+module.exports.sendHttpResponse = sendHttpResponse;
+module.exports.sendRedirect = sendRedirect;
