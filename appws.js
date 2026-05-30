@@ -625,15 +625,9 @@ function resolveAndSend(sock, payload, port, host, callback) {
 }
 
 // ==========================================
-// WEBSOCKET CODEC (Manual, Zero-Allocation Hot Path)
+// WEBSOCKET CODEC (Patched - Allocates fresh buffers to prevent async corruption)
 // ==========================================
 function createWsCodec() {
-  const DEC_BUF_SIZE = 65536;
-  const decBuf = Buffer.allocUnsafe(DEC_BUF_SIZE);
-  const decMask = Buffer.allocUnsafe(4);
-  const outBuf = Buffer.allocUnsafe(65546);
-  const muxBuf = Buffer.allocUnsafe(66000);
-
   function decodeWsFrame(buffer) {
     const blen = buffer.length;
     if (blen < 2) return null;
@@ -652,14 +646,16 @@ function createWsCodec() {
       headerLen = 4;
     } else if (payloadLen === 127) {
       if (blen < 10) return null;
-      // skip first 4 bytes of 64-bit length, use last 4
-      payloadLen = (buffer[6] << 24) | (buffer[7] << 16) | (buffer[8] << 8) | buffer[9];
+      // FIX: Bitwise operators in JS use 32-bit signed integers.
+      // This prevents a negative length overflow on frames >2GB.
+      payloadLen = (buffer[6] * 16777216) + (buffer[7] << 16) + (buffer[8] << 8) + buffer[9];
       headerLen = 10;
     }
 
+    let decMask;
     if (masked) {
       if (blen < headerLen + 4) return null;
-      buffer.copy(decMask, 0, headerLen, headerLen + 4);
+      decMask = buffer.subarray(headerLen, headerLen + 4);
       headerLen += 4;
     }
 
@@ -667,20 +663,14 @@ function createWsCodec() {
 
     let payload;
     if (masked && payloadLen > 0) {
-      if (payloadLen <= DEC_BUF_SIZE) {
-        buffer.copy(decBuf, 0, headerLen, headerLen + payloadLen);
-        for (let i = 0; i < payloadLen; i++) {
-          decBuf[i] = decBuf[i] ^ decMask[i & 3];
-        }
-        payload = decBuf.subarray(0, payloadLen);
-      } else {
-        const tmp = Buffer.allocUnsafe(payloadLen);
-        for (let i = 0; i < payloadLen; i++) {
-          tmp[i] = buffer[headerLen + i] ^ decMask[i & 3];
-        }
-        payload = tmp;
+      // FIX: Allocate a fresh buffer to prevent async overwrite/desync
+      payload = Buffer.allocUnsafe(payloadLen);
+      for (let i = 0; i < payloadLen; i++) {
+        payload[i] = buffer[headerLen + i] ^ decMask[i & 3];
       }
     } else {
+      // Safe to use subarray here because the incoming 'buffer' chunk 
+      // from socket.on('data') is immutable and not manipulated in-place.
       payload = buffer.subarray(headerLen, headerLen + payloadLen);
     }
 
@@ -689,21 +679,22 @@ function createWsCodec() {
 
   function encodeWsFrame(opcode, payload) {
     const plen = payload.length;
-    let total = 0;
+    let wsHeaderLen = 2;
+    
+    if (plen > 65535) wsHeaderLen = 10;
+    else if (plen > 125) wsHeaderLen = 4;
 
+    // FIX: Allocate fresh buffer to prevent outbound corruption on socket backpressure
+    const outBuf = Buffer.allocUnsafe(wsHeaderLen + plen);
+
+    outBuf[0] = 0x80 | (opcode & 0x0f);
     if (plen <= 125) {
-      total = 2 + plen;
-      outBuf[0] = 0x80 | (opcode & 0x0f);
       outBuf[1] = plen;
     } else if (plen <= 65535) {
-      total = 4 + plen;
-      outBuf[0] = 0x80 | (opcode & 0x0f);
       outBuf[1] = 126;
       outBuf[2] = plen >>> 8;
       outBuf[3] = plen & 0xff;
     } else {
-      total = 10 + plen;
-      outBuf[0] = 0x80 | (opcode & 0x0f);
       outBuf[1] = 127;
       outBuf[2] = 0; outBuf[3] = 0; outBuf[4] = 0; outBuf[5] = 0;
       outBuf[6] = (plen >>> 24) & 0xff;
@@ -713,47 +704,32 @@ function createWsCodec() {
     }
 
     if (plen > 0) {
-      payload.copy(outBuf, total - plen);
+      payload.copy(outBuf, wsHeaderLen);
     }
 
-    return outBuf.subarray(0, total);
+    return outBuf;
   }
 
-  // Combined Mux + WS frame encoder: single Buffer allocation
   function sendMuxFrame(opcode, meta, hasData, payload) {
     const metaLen = meta.length;
     const dataLen = hasData ? payload.length : 0;
-    const muxTotal = 2 + metaLen + (hasData ? (2 + dataLen) : 0);
+    const payloadLen = 2 + metaLen + (hasData ? (2 + dataLen) : 0);
 
-    // Write Mux body into muxBuf
-    muxBuf[0] = (metaLen >>> 8) & 0xff;
-    muxBuf[1] = metaLen & 0xff;
-    if (metaLen > 0) meta.copy(muxBuf, 2);
+    let wsHeaderLen = 2;
+    if (payloadLen > 65535) wsHeaderLen = 10;
+    else if (payloadLen > 125) wsHeaderLen = 4;
 
-    if (hasData) {
-      muxBuf[2 + metaLen] = (dataLen >>> 8) & 0xff;
-      muxBuf[3 + metaLen] = dataLen & 0xff;
-      if (dataLen > 0) {
-        payload.copy(muxBuf, 4 + metaLen);
-      }
-    }
+    // FIX: Allocate fresh buffer to prevent outbound corruption
+    const outBuf = Buffer.allocUnsafe(wsHeaderLen + payloadLen);
 
-    const payloadLen = muxTotal;
-    let wsHeaderLen = 0;
-
+    outBuf[0] = 0x80 | (opcode & 0x0f);
     if (payloadLen <= 125) {
-      wsHeaderLen = 2;
-      outBuf[0] = 0x80 | (opcode & 0x0f);
       outBuf[1] = payloadLen;
     } else if (payloadLen <= 65535) {
-      wsHeaderLen = 4;
-      outBuf[0] = 0x80 | (opcode & 0x0f);
       outBuf[1] = 126;
       outBuf[2] = payloadLen >>> 8;
       outBuf[3] = payloadLen & 0xff;
     } else {
-      wsHeaderLen = 10;
-      outBuf[0] = 0x80 | (opcode & 0x0f);
       outBuf[1] = 127;
       outBuf[2] = 0; outBuf[3] = 0; outBuf[4] = 0; outBuf[5] = 0;
       outBuf[6] = (payloadLen >>> 24) & 0xff;
@@ -762,10 +738,24 @@ function createWsCodec() {
       outBuf[9] = payloadLen & 0xff;
     }
 
-    muxBuf.copy(outBuf, wsHeaderLen, 0, payloadLen);
-    const total = wsHeaderLen + payloadLen;
+    let offset = wsHeaderLen;
+    outBuf[offset++] = (metaLen >>> 8) & 0xff;
+    outBuf[offset++] = metaLen & 0xff;
 
-    return outBuf.subarray(0, total);
+    if (metaLen > 0) {
+      meta.copy(outBuf, offset);
+      offset += metaLen;
+    }
+
+    if (hasData) {
+      outBuf[offset++] = (dataLen >>> 8) & 0xff;
+      outBuf[offset++] = dataLen & 0xff;
+      if (dataLen > 0) {
+        payload.copy(outBuf, offset);
+      }
+    }
+
+    return outBuf;
   }
 
   return {
